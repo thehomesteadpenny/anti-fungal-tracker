@@ -407,46 +407,39 @@
   // Reads one day. Distinguishes three cases:
   //   - data exists  -> returns the day object
   //   - no entry yet -> returns null
-  //   - read error   -> retries once, then returns null but logs it
-  async function readRaw(key){
-    var res = await window.storage.get(key);
-    // The storage API may return the value directly, or wrapped as
-    // { value: ... }. Normalize both shapes here.
-    if (res == null) return null;
-    if (typeof res === "string") return res;
-    if (typeof res.value === "string") return res.value;
-    if (res.value != null) return JSON.stringify(res.value);
-    return null;
+  //
+  // Storage: uses the browser's localStorage (the standard, reliable
+  // mechanism). This persists on a hosted page (e.g. GitHub Pages).
+  // NOTE: localStorage is blocked inside the Claude artifact preview,
+  // so this will only save once the file is hosted at a real URL.
+
+  function readRaw(key){
+    try {
+      var v = localStorage.getItem(key);
+      return (v === null) ? null : v;
+    } catch (e) {
+      return null;   // localStorage unavailable (e.g. in-chat preview)
+    }
   }
   async function getDay(d){
     var key = dayKey(d);
-    // a value saved this session always wins - no storage round-trip needed
+    // a value saved this session always wins
     if (dayCache[key]) {
       var cd = blankDay();
       for (var ck in cd) { if (ck in dayCache[key]) cd[ck] = dayCache[key][ck]; }
       return cd;
     }
-    for (var attempt = 0; attempt < 2; attempt++) {
-      try {
-        var raw = await readRaw(key);
-        if (raw == null) return null;            // genuinely no entry
-        var saved = (typeof raw === "string") ? JSON.parse(raw) : raw;
-        var day = blankDay();
-        for (var k in day) { if (k in saved) day[k] = saved[k]; }
-        dayCache[key] = day;                     // cache successful reads too
-        return day;
-      } catch (e) {
-        var msg = String(e && e.message ? e.message : e).toLowerCase();
-        if (msg.indexOf("not found") !== -1 ||
-            msg.indexOf("no value") !== -1 ||
-            msg.indexOf("does not exist") !== -1) {
-          return null;
-        }
-        if (attempt === 0) { await new Promise(function(r){ setTimeout(r, 60); }); continue; }
-        return null;
-      }
+    try {
+      var raw = readRaw(key);
+      if (raw == null) return null;            // genuinely no entry
+      var saved = JSON.parse(raw);
+      var day = blankDay();
+      for (var k in day) { if (k in saved) day[k] = saved[k]; }
+      dayCache[key] = day;                     // cache successful reads
+      return day;
+    } catch (e) {
+      return null;
     }
-    return null;
   }
   async function loadDay(){
     var d = await getDay(current);
@@ -454,16 +447,15 @@
     renderDaily();
   }
   async function persist(){
+    var key = dayKey(current);
+    var payload = JSON.stringify(state);
+    // always keep an in-memory copy so this session stays correct
+    dayCache[key] = JSON.parse(payload);
     try {
-      var key = dayKey(current);
-      var payload = JSON.stringify(state);
-      await window.storage.set(key, payload);
-      dayCache[key] = JSON.parse(payload);   // cache what we just saved
+      localStorage.setItem(key, payload);
       toast();
-    } catch(e) {
-      // even if the write reports an error, keep the value in memory
-      // so the Overview reflects this session correctly
-      dayCache[dayKey(current)] = JSON.parse(JSON.stringify(state));
+    } catch (e) {
+      // localStorage unavailable (in-chat preview) - in-memory copy still holds
     }
   }
   function queueSave(){
@@ -471,7 +463,6 @@
     saveTimer = setTimeout(persist, 350);
   }
   // Immediately write any pending change instead of waiting for the debounce.
-  // Called before the Overview reads from storage so today is never missed.
   async function flushSave(){
     if (saveTimer) {
       clearTimeout(saveTimer);
@@ -556,9 +547,9 @@
 
   async function loadSettings(){
     try {
-      var res = await window.storage.get("aft:settings");
-      if (res && res.value) {
-        var s = JSON.parse(res.value);
+      var raw = localStorage.getItem("aft:settings");
+      if (raw) {
+        var s = JSON.parse(raw);
         if (s.start) { planStart = new Date(s.start + "T00:00:00"); }
         if (s.len) { planLen = s.len; }
       }
@@ -570,7 +561,7 @@
   }
   async function saveSettings(){
     try {
-      await window.storage.set("aft:settings", JSON.stringify({
+      localStorage.setItem("aft:settings", JSON.stringify({
         start: planStart ? ymd(planStart) : null,
         len: planLen
       }));
